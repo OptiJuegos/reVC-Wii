@@ -1,0 +1,72 @@
+#ifndef __GTA_QUATERNION_H__
+#define __GTA_QUATERNION_H__
+
+#ifdef GTA_PS2
+class TYPEALIGN(16) CQuaternion
+#else
+class CQuaternion
+#endif
+{
+public:
+	float x, y, z, w;
+	CQuaternion(void) {}
+	CQuaternion(float x, float y, float z, float w) : x(x), y(y), z(z), w(w) {}
+
+//	float Magnitude(void) const { return Sqrt(x*x + y*y + z*z + w*w); }
+	float GetLengthSquared(void) const { return x*x + y*y + z*z + w*w; }
+	void Normalise(void);
+	void Multiply(const CQuaternion &q1, const CQuaternion &q2);
+	CQuaternion &Invert(void);
+	void Scale(float s);
+	void Copy(const CQuaternion &q);
+
+	CQuaternion &operator=(CQuaternion const &rhs);
+
+	const CQuaternion &operator+=(CQuaternion const &right);
+	const CQuaternion &operator-=(CQuaternion const &right);
+
+	CQuaternion operator-() const {
+		return CQuaternion(-x, -y, -z, -w);
+	}
+
+	void Slerp(const CQuaternion &q1, const CQuaternion &q2, float theta, float invSin, float t);
+	void Get(RwV3d *axis, float *angle);
+	void Set(RwV3d *axis, float angle);
+	void Get(RwMatrix *matrix);
+	void Set(const RwMatrix &matrix);
+	void Set(float f1, float f2, float f3);
+	void Get(float *f1, float *f2, float *f3);
+};
+
+inline float
+DotProduct(const CQuaternion &q1, const CQuaternion &q2)
+{
+	return q1.x*q2.x + q1.y*q2.y + q1.z*q2.z + q1.w*q2.w;
+}
+
+inline CQuaternion operator+(const CQuaternion &left, const CQuaternion &right)
+{
+	return CQuaternion(left.x + right.x, left.y + right.y, left.z + right.z, left.w + right.w);
+}
+
+inline CQuaternion operator-(const CQuaternion &left, const CQuaternion &right)
+{
+	return CQuaternion(left.x - right.x, left.y - right.y, left.z - right.z, left.w - right.w);
+}
+
+inline CQuaternion operator*(const CQuaternion &left, float right)
+{
+	return CQuaternion(left.x * right, left.y * right, left.z * right, left.w * right);
+}
+
+inline CQuaternion operator*(float left, const CQuaternion &right)
+{
+	return CQuaternion(left * right.x, left * right.y, left * right.z, left * right.w);
+}
+
+inline CQuaternion operator/(const CQuaternion &left, float right)
+{
+	return CQuaternion(left.x / right, left.y / right, left.z / right, left.w / right);
+}
+
+#endif // __GTA_QUATERNION_H__

@@ -1,0 +1,895 @@
+#ifndef _WIN32
+#include "common.h"
+#if defined(GTA_PC) || defined(GTA_MOBILE)
+#include "crossplatform.h"
+#include <signal.h>
+#include <pthread.h>
+#ifndef ANDROID
+#include <semaphore.h>
+#endif
+#ifdef NINTENDO_WII
+#include <ogc/lwp.h>
+#include <ogc/mutex.h>
+#include <ogc/cond.h>
+#endif
+#include <sys/types.h>
+#include <unistd.h>
+#include <sys/time.h>
+#ifndef ANDROID
+#include <sys/statvfs.h>
+#else
+#include "AndroidMain.h"
+#include <sys/vfs.h>
+#define statvfs statfs
+#endif
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <stdarg.h>
+#include <limits.h>
+
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
+
+#include "CdStream.h"
+#include "MemoryMgr.h"
+#ifdef NINTENDO_WII
+#include "wii-port/WiiLog.h"
+#endif
+
+#define CDDEBUG(f, ...)   debug ("%s: " f "\n", "cdvd_stream", ## __VA_ARGS__)
+#define CDTRACE(f, ...)   debug ("%s: " f "\n", "cdvd_stream trace", ## __VA_ARGS__)
+
+#ifdef FLUSHABLE_STREAMING
+bool flushStream[MAX_CDCHANNELS];
+#endif
+
+#ifdef USE_UNNAMED_SEM
+
+#define RE3_SEM_OPEN(name, ...) re3_sem_open()
+sem_t*
+re3_sem_open(void)
+{
+	sem_t* sem = (sem_t*)malloc(sizeof(sem_t));
+	if (sem_init(sem, 0, 1) == -1) {
+		sem = SEM_FAILED;
+	}
+
+	return sem;
+}
+
+#define RE3_SEM_CLOSE(sem, format, ...) re3_sem_close(sem)
+void
+re3_sem_close(sem_t* sem)
+{
+	sem_destroy(sem);
+	free(sem);
+}
+
+#elifndef ANDROID
+
+#define RE3_SEM_OPEN re3_sem_open
+sem_t*
+re3_sem_open(const char* format, ...)
+{
+    char semName[21];
+    va_list va;
+    va_start(va, format);
+    vsprintf(semName, format, va);
+
+    return sem_open(semName, O_CREAT, 0644, 1);
+}
+
+#define RE3_SEM_CLOSE re3_sem_close
+void
+re3_sem_close(sem_t* sem, const char* format, ...)
+{
+    sem_close(sem);
+
+    char semName[21];
+    va_list va;
+    va_start(va, format);
+    vsprintf(semName, format, va);
+
+    sem_unlink(semName);
+}
+
+#endif
+
+struct CdReadInfo
+{
+	uint32 nSectorOffset;
+	uint32 nSectorsToRead;
+	void *pBuffer;
+	bool bLocked;
+	bool bReading;
+	int32 nStatus;
+#ifdef ONE_THREAD_PER_CHANNEL
+	int8 nThreadStatus; // 0: created 1:priority set up 2:abort now
+	pthread_t pChannelThread;
+	sem_t *pStartSemaphore;
+#endif
+#ifdef NINTENDO_WII
+	cond_t pDoneCondition; // signalled when the asynchronous Wii read completes
+#elif !defined(ANDROID)
+	sem_t *pDoneSemaphore; // used for CdStreamSync
+#else
+	pthread_mutex_t pDoneSemaphore; // used for CdStreamSync
+#endif
+	int32 hFile;
+};
+
+char gCdImageNames[MAX_CDIMAGES+1][64];
+int32 gNumImages;
+int32 gNumChannels;
+
+int32 gImgFiles[MAX_CDIMAGES]; // -1: error 0:unused otherwise: fd
+char *gImgNames[MAX_CDIMAGES];
+
+#ifndef ONE_THREAD_PER_CHANNEL
+#ifdef NINTENDO_WII
+lwp_t _gCdStreamThread = LWP_THREAD_NULL;
+mutex_t gCdStreamMutex = LWP_MUTEX_NULL;
+cond_t gCdStreamRequestCondition = LWP_COND_NULL;
+static uint8 gCdStreamStack[32*1024] __attribute__((aligned(32)));
+#else
+pthread_t _gCdStreamThread;
+#ifndef ANDROID
+sem_t *gCdStreamSema; // released when we have new thing to read(so channel is set)
+#elif ANDROID
+pthread_mutex_t gCdStreamSema; // released when we have new thing to read(so channel is set)
+#endif
+#endif
+int8 gCdStreamThreadStatus; // 0: created 1:priority set up 2:abort now
+Queue gChannelRequestQ;
+bool _gbCdStreamOverlapped;
+#endif
+
+CdReadInfo *gpReadInfo;
+
+int32 lastPosnRead;
+
+int _gdwCdStreamFlags;
+
+void *CdStreamThread(void* channelId);
+
+void
+CdStreamInitThread(void)
+{
+#ifdef NINTENDO_WII
+	// Broadway is single-core, so the point of this worker is not CPU
+	// parallelism: it keeps SD/USB latency out of the game thread.
+	gChannelRequestQ.items = (int32 *)calloc(gNumChannels + 1, sizeof(int32));
+	gChannelRequestQ.head = 0;
+	gChannelRequestQ.tail = 0;
+	gChannelRequestQ.size = gNumChannels + 1;
+	ASSERT(gChannelRequestQ.items != nil);
+
+	if(LWP_MutexInit(&gCdStreamMutex, false) < 0 ||
+	   LWP_CondInit(&gCdStreamRequestCondition) < 0){
+		CDTRACE("failed to create Wii stream synchronisation objects");
+		ASSERT(0);
+		return;
+	}
+
+	for(int32 i = 0; i < gNumChannels; i++){
+		gpReadInfo[i].pDoneCondition = LWP_COND_NULL;
+		if(LWP_CondInit(&gpReadInfo[i].pDoneCondition) < 0){
+			CDTRACE("failed to create Wii stream channel condition");
+			ASSERT(0);
+			return;
+		}
+	}
+
+	gCdStreamThreadStatus = 0;
+	// Use an explicitly aligned stack. libogc expects the supplied stack buffer
+	// to remain valid for the whole thread lifetime. A middle priority keeps
+	// streaming responsive without starving the main game/audio work.
+	if(LWP_CreateThread(&_gCdStreamThread, CdStreamThread, nil,
+	                    gCdStreamStack, sizeof(gCdStreamStack), 64) < 0){
+		CDTRACE("failed to create Wii cdstream thread");
+		ASSERT(0);
+		return;
+	}
+	debug("Using asynchronous Wii streaming thread\n");
+#else
+	int status;
+#ifndef ONE_THREAD_PER_CHANNEL
+	gChannelRequestQ.items = (int32 *)calloc(gNumChannels + 1, sizeof(int32));
+	gChannelRequestQ.head = 0;
+	gChannelRequestQ.tail = 0;
+	gChannelRequestQ.size = gNumChannels + 1;
+	ASSERT(gChannelRequestQ.items != nil );
+#ifndef ANDROID
+    gCdStreamSema = RE3_SEM_OPEN("/semaphore_cd_stream");
+
+
+    if (gCdStreamSema == SEM_FAILED) {
+        CDTRACE("failed to create stream semaphore");
+        ASSERT(0);
+        return;
+    }
+#elif ANDROID
+	//pthread_mutex_unlock(&gCdStreamSema);
+#endif
+#endif
+
+	if ( gNumChannels > 0 )
+	{
+		for ( int32 i = 0; i < gNumChannels; i++ )
+		{
+#ifndef ANDROID
+            gpReadInfo[i].pDoneSemaphore = RE3_SEM_OPEN("/semaphore_done%d", i);
+
+			if (gpReadInfo[i].pDoneSemaphore == SEM_FAILED)
+			{
+				CDTRACE("failed to create sync semaphore");
+				ASSERT(0);
+				return;
+			}
+#elif ANDROID
+			//pthread_mutex_unlock(&gpReadInfo[i].doneMutex);
+#endif
+
+#ifdef ONE_THREAD_PER_CHANNEL
+			gpReadInfo[i].pStartSemaphore = RE3_SEM_OPEN("/semaphore_start%d", i);
+
+			if (gpReadInfo[i].pStartSemaphore == SEM_FAILED)
+			{
+				CDTRACE("failed to create start semaphore");
+				ASSERT(0);
+				return;
+			}
+			gpReadInfo[i].nThreadStatus = 0;
+			int *channelI = (int*)malloc(sizeof(int));
+			*channelI = i;
+			status = pthread_create(&gpReadInfo[i].pChannelThread, NULL, CdStreamThread, (void*)channelI);
+
+			if (status == -1)
+			{
+				CDTRACE("failed to create sync thread");
+				ASSERT(0);
+				return;
+			}
+#endif
+		}
+	}
+
+#ifndef ONE_THREAD_PER_CHANNEL
+	debug("Using one streaming thread for all channels\n");
+	gCdStreamThreadStatus = 0;
+	status = pthread_create(&_gCdStreamThread, NULL, CdStreamThread, nil);
+
+	if (status == -1)
+	{
+		CDTRACE("failed to create sync thread");
+		ASSERT(0);
+		return;
+	}
+#else
+	debug("Using separate streaming threads for each channel\n");
+#endif
+#endif
+}
+
+void
+CdStreamInit(int32 numChannels)
+{
+	struct statvfs fsInfo;
+#if defined ANDROID
+	char imgPath[MAX_PATH];
+	if(StorageRootBuffer == NULL) {
+		char pwd[128];
+		getcwd(pwd, 128);
+		setenv("STORAGE_ROOT", pwd, 1);
+        debug("%s\n", pwd);
+	}
+	
+	debug("FILES %s\n", StorageRootBuffer);
+	strcpy(imgPath, StorageRootBuffer);
+	strcat(imgPath, "/models/gta3.img");
+    debug("%s\n", imgPath);
+
+    if((statvfs(imgPath, &fsInfo)) < 0)
+#elifndef ANDROID
+    if((statvfs("models/gta3.img", &fsInfo)) < 0)
+#endif
+	{
+		CDTRACE("can't get filesystem info");
+		ASSERT(0);
+		return;
+	}
+#if defined ANDROID
+	_gdwCdStreamFlags = O_RDONLY;
+#elif defined __linux__
+	_gdwCdStreamFlags = O_RDONLY | O_NOATIME;
+#else
+	_gdwCdStreamFlags = O_RDONLY;
+#endif
+	// People say it's slower
+/*
+	if ( fsInfo.f_bsize <= CDSTREAM_SECTOR_SIZE )
+	{
+		_gdwCdStreamFlags |= O_DIRECT;
+		debug("Using no buffered loading for streaming\n");
+	}
+*/
+	void *pBuffer = (void *)RwMallocAlign(CDSTREAM_SECTOR_SIZE, (RwUInt32)fsInfo.f_bsize);
+	ASSERT( pBuffer != nil );
+
+	gNumImages = 0;
+
+	gNumChannels = numChannels;
+	ASSERT( gNumChannels != 0 );
+
+	gpReadInfo = (CdReadInfo *)calloc(numChannels, sizeof(CdReadInfo));
+	ASSERT( gpReadInfo != nil );
+
+	CDDEBUG("read info %p", gpReadInfo);
+
+	CdStreamInitThread();
+
+	ASSERT( pBuffer != nil );
+	RwFreeAlign(pBuffer);
+}
+
+uint32
+GetGTA3ImgSize(void)
+{
+	ASSERT( gImgFiles[0] > 0 );
+	struct stat statbuf;
+
+	char path[PATH_MAX];
+	realpath(gImgNames[0], path);
+	if (stat(path, &statbuf) == -1) {
+		// Try case-insensitivity
+		char* real = casepath(gImgNames[0], false);
+		if (real)
+		{
+			realpath(real, path);
+			free(real);
+			if (stat(path, &statbuf) != -1)
+				goto ok;
+		}
+
+		CDTRACE("can't get size of gta3.img");
+		ASSERT(0);
+		return 0;
+	}
+	ok:
+	return (uint32)statbuf.st_size;
+}
+
+void
+CdStreamShutdown(void)
+{
+#ifdef NINTENDO_WII
+	if(gCdStreamMutex != LWP_MUTEX_NULL){
+		LWP_MutexLock(gCdStreamMutex);
+		gCdStreamThreadStatus = 2;
+		if(gCdStreamRequestCondition != LWP_COND_NULL)
+			LWP_CondBroadcast(gCdStreamRequestCondition);
+		LWP_MutexUnlock(gCdStreamMutex);
+	}
+	if(_gCdStreamThread != LWP_THREAD_NULL){
+		LWP_JoinThread(_gCdStreamThread, nil);
+		_gCdStreamThread = LWP_THREAD_NULL;
+	}
+	if(gpReadInfo){
+		for(int32 i = 0; i < gNumChannels; i++)
+			if(gpReadInfo[i].pDoneCondition != LWP_COND_NULL)
+				LWP_CondDestroy(gpReadInfo[i].pDoneCondition);
+		free(gpReadInfo);
+		gpReadInfo = nil;
+	}
+	if(gCdStreamRequestCondition != LWP_COND_NULL){
+		LWP_CondDestroy(gCdStreamRequestCondition);
+		gCdStreamRequestCondition = LWP_COND_NULL;
+	}
+	if(gCdStreamMutex != LWP_MUTEX_NULL){
+		LWP_MutexDestroy(gCdStreamMutex);
+		gCdStreamMutex = LWP_MUTEX_NULL;
+	}
+	free(gChannelRequestQ.items);
+	gChannelRequestQ.items = nil;
+#else
+    // Destroying semaphores and free(gpReadInfo) will be done at threads
+#ifndef ONE_THREAD_PER_CHANNEL
+	gCdStreamThreadStatus = 2;
+#ifndef ANDROID
+	sem_post(gCdStreamSema);
+#elif ANDROID
+	pthread_mutex_unlock(&gCdStreamSema);
+#endif
+	pthread_join(_gCdStreamThread, nil);
+#else
+	for ( int32 i = 0; i < gNumChannels; i++ ) {
+		gpReadInfo[i].nThreadStatus = 2;
+		sem_post(gpReadInfo[i].pStartSemaphore);
+		pthread_join(gpReadInfo[i].pChannelThread, nil);
+	}
+#endif
+#endif
+}
+
+
+int32
+CdStreamRead(int32 channel, void *buffer, uint32 offset, uint32 size)
+{
+	ASSERT( channel < gNumChannels );
+	ASSERT( buffer != nil );
+
+	lastPosnRead = size + offset;
+
+	ASSERT( _GET_INDEX(offset) < MAX_CDIMAGES );
+	int32 hImage = gImgFiles[_GET_INDEX(offset)];
+	ASSERT( hImage > 0 );
+
+	CdReadInfo *pChannel = &gpReadInfo[channel];
+	ASSERT( pChannel != nil );
+
+#ifdef NINTENDO_WII
+	LWP_MutexLock(gCdStreamMutex);
+	if(pChannel->nSectorsToRead != 0 || pChannel->bReading){
+		if(pChannel->hFile == hImage - 1 &&
+		   pChannel->nSectorOffset == _GET_OFFSET(offset) &&
+		   pChannel->nSectorsToRead >= size){
+			LWP_MutexUnlock(gCdStreamMutex);
+			return STREAM_SUCCESS;
+		}
+		// FLUSHABLE_STREAMING stays disabled on Wii for now. Cancelling an
+		// in-flight FAT read is not worth the extra race surface.
+		LWP_MutexUnlock(gCdStreamMutex);
+		return STREAM_NONE;
+	}
+
+	pChannel->hFile = hImage - 1;
+	pChannel->nStatus = STREAM_NONE;
+	pChannel->nSectorOffset = _GET_OFFSET(offset);
+	pChannel->nSectorsToRead = size;
+	pChannel->pBuffer = buffer;
+	pChannel->bLocked = 0;
+	pChannel->bReading = false;
+	AddToQueue(&gChannelRequestQ, channel);
+	LWP_CondSignal(gCdStreamRequestCondition);
+	LWP_MutexUnlock(gCdStreamMutex);
+	return STREAM_SUCCESS;
+#else
+
+	if ( pChannel->nSectorsToRead != 0 || pChannel->bReading ) {
+		if (pChannel->hFile == hImage - 1 && pChannel->nSectorOffset == _GET_OFFSET(offset) && pChannel->nSectorsToRead >= size)
+			return STREAM_SUCCESS;
+#ifdef FLUSHABLE_STREAMING
+		flushStream[channel] = 1;
+		CdStreamSync(channel);
+#else
+		return STREAM_NONE;
+#endif
+	}
+
+	pChannel->hFile = hImage - 1;
+	pChannel->nStatus = STREAM_NONE;
+	pChannel->nSectorOffset = _GET_OFFSET(offset);
+	pChannel->nSectorsToRead = size;
+	pChannel->pBuffer = buffer;
+	pChannel->bLocked = 0;
+
+#ifndef ONE_THREAD_PER_CHANNEL
+	AddToQueue(&gChannelRequestQ, channel);
+#if defined ANDROID
+	if ( pthread_mutex_unlock(&gCdStreamSema) != 0 )
+#else
+    if ( sem_post(gCdStreamSema) != 0 )
+#endif
+		printf("Signal Sema Error\n");
+#else
+	if ( sem_post(pChannel->pStartSemaphore) != 0 )
+		printf("Signal Sema Error\n");
+#endif
+
+	return STREAM_SUCCESS;
+#endif
+}
+
+int32
+CdStreamGetStatus(int32 channel)
+{
+	ASSERT( channel < gNumChannels );
+	CdReadInfo *pChannel = &gpReadInfo[channel];
+	ASSERT( pChannel != nil );
+
+#ifdef NINTENDO_WII
+	LWP_MutexLock(gCdStreamMutex);
+	if(gCdStreamThreadStatus == 2){
+		LWP_MutexUnlock(gCdStreamMutex);
+		return STREAM_NONE;
+	}
+	int32 status;
+	if(pChannel->bReading)
+		status = STREAM_READING;
+	else if(pChannel->nSectorsToRead != 0)
+		status = STREAM_WAITING;
+	else if(pChannel->nStatus != STREAM_NONE){
+		status = pChannel->nStatus;
+		pChannel->nStatus = STREAM_NONE;
+	}else
+		status = STREAM_NONE;
+	LWP_MutexUnlock(gCdStreamMutex);
+	return status;
+#else
+
+#ifdef ONE_THREAD_PER_CHANNEL
+	if (pChannel->nThreadStatus == 2)
+		return STREAM_NONE;
+#else
+	if (gCdStreamThreadStatus == 2)
+		return STREAM_NONE;
+#endif
+
+	if ( pChannel->bReading )
+		return STREAM_READING;
+
+	if ( pChannel->nSectorsToRead != 0 )
+		return STREAM_WAITING;
+
+	if ( pChannel->nStatus != STREAM_NONE )
+	{
+		int32 status = pChannel->nStatus;
+		pChannel->nStatus = STREAM_NONE;
+
+		return status;
+	}
+
+	return STREAM_NONE;
+#endif
+}
+
+int32
+CdStreamGetLastPosn(void)
+{
+	return lastPosnRead;
+}
+
+// wait for channel to finish reading
+int32
+CdStreamSync(int32 channel)
+{
+	ASSERT( channel < gNumChannels );
+	CdReadInfo *pChannel = &gpReadInfo[channel];
+	ASSERT( pChannel != nil );
+
+#ifdef NINTENDO_WII
+	LWP_MutexLock(gCdStreamMutex);
+	while(pChannel->nSectorsToRead != 0 || pChannel->bReading){
+		pChannel->bLocked = true;
+		LWP_CondWait(pChannel->pDoneCondition, gCdStreamMutex);
+	}
+	pChannel->bLocked = false;
+	int32 status = pChannel->nStatus;
+	LWP_MutexUnlock(gCdStreamMutex);
+	return status;
+#else
+
+#ifdef FLUSHABLE_STREAMING
+	if (flushStream[channel]) {
+		pChannel->nSectorsToRead = 0;
+#ifdef ONE_THREAD_PER_CHANNEL
+		pthread_kill(pChannel->pChannelThread, SIGUSR1);
+		if (pChannel->bReading) {
+			pChannel->bLocked = true;
+#else
+		if (pChannel->bReading) {
+			pChannel->bLocked = true;
+			pthread_kill(_gCdStreamThread, SIGUSR1);
+#endif
+			while (pChannel->bLocked)
+#ifndef ANDROID
+				sem_wait(pChannel->pDoneSemaphore);
+#elif ANDROID
+				pthread_mutex_lock(&pChannel->pDoneSemaphore);
+#endif
+		}
+		pChannel->bReading = false;
+		flushStream[channel] = false;
+		return STREAM_NONE;
+	}
+#endif
+
+	if ( pChannel->nSectorsToRead != 0 )
+	{
+		pChannel->bLocked = true;
+		while (pChannel->bLocked && pChannel->nSectorsToRead != 0){
+#ifndef ANDROID
+			sem_wait(pChannel->pDoneSemaphore);
+#elif ANDROID
+			pthread_mutex_lock(&pChannel->pDoneSemaphore);
+#endif
+		}
+		pChannel->bLocked = false;
+	}
+
+	pChannel->bReading = false;
+
+	return pChannel->nStatus;
+#endif
+}
+
+void
+AddToQueue(Queue *queue, int32 item)
+{
+	ASSERT( queue != nil );
+	ASSERT( queue->items != nil );
+	queue->items[queue->tail] = item;
+
+	queue->tail = (queue->tail + 1) % queue->size;
+
+	if ( queue->head == queue->tail )
+		debug("Queue is full\n");
+}
+
+int32
+GetFirstInQueue(Queue *queue)
+{
+	ASSERT( queue != nil );
+	if ( queue->head == queue->tail )
+		return -1;
+
+	ASSERT( queue->items != nil );
+	return queue->items[queue->head];
+}
+
+void
+RemoveFirstInQueue(Queue *queue)
+{
+	ASSERT( queue != nil );
+	if ( queue->head == queue->tail )
+	{
+		debug("Queue is empty\n");
+		return;
+	}
+
+	queue->head = (queue->head + 1) % queue->size;
+}
+
+void *CdStreamThread(void *param)
+{
+	debug("Created cdstream thread\n");
+
+#ifdef NINTENDO_WII
+	(void)param;
+	for(;;){
+		LWP_MutexLock(gCdStreamMutex);
+		while(gCdStreamThreadStatus != 2 &&
+		      GetFirstInQueue(&gChannelRequestQ) == -1)
+			LWP_CondWait(gCdStreamRequestCondition, gCdStreamMutex);
+
+		if(gCdStreamThreadStatus == 2){
+			LWP_MutexUnlock(gCdStreamMutex);
+			break;
+		}
+
+		int32 channel = GetFirstInQueue(&gChannelRequestQ);
+		if(channel < 0){
+			LWP_MutexUnlock(gCdStreamMutex);
+			continue;
+		}
+		RemoveFirstInQueue(&gChannelRequestQ);
+		CdReadInfo *pChannel = &gpReadInfo[channel];
+		if(pChannel->nSectorsToRead == 0){
+			LWP_MutexUnlock(gCdStreamMutex);
+			continue;
+		}
+
+		// Snapshot the request while protected; the channel cannot be reused
+		// until nSectorsToRead is cleared below.
+		const int32 fd = pChannel->hFile;
+		const uint32 sector = pChannel->nSectorOffset;
+		const uint32 sectors = pChannel->nSectorsToRead;
+		uint8 *destination = (uint8*)pChannel->pBuffer;
+		pChannel->bReading = true;
+		if(gCdStreamThreadStatus == 0)
+			gCdStreamThreadStatus = 1;
+		LWP_MutexUnlock(gCdStreamMutex);
+
+		int32 result = STREAM_NONE;
+		off_t byteOffset = (off_t)sector * CDSTREAM_SECTOR_SIZE;
+		size_t bytesLeft = (size_t)sectors * CDSTREAM_SECTOR_SIZE;
+		if(lseek(fd, byteOffset, SEEK_SET) == (off_t)-1)
+			result = STREAM_ERROR;
+
+		// DCA3's useful streaming idea on Wii: split large transfers instead
+		// of issuing one huge blocking read. 64 KiB is large enough for FAT
+		// throughput while keeping individual I/O stalls bounded.
+		while(result == STREAM_NONE && bytesLeft != 0){
+			size_t chunk = bytesLeft > 64*1024 ? 64*1024 : bytesLeft;
+			ssize_t bytesRead = read(fd, destination, chunk);
+			if(bytesRead <= 0){
+				result = STREAM_ERROR;
+				break;
+			}
+			destination += bytesRead;
+			bytesLeft -= (size_t)bytesRead;
+		}
+
+		LWP_MutexLock(gCdStreamMutex);
+		pChannel->nStatus = result;
+		pChannel->nSectorsToRead = 0;
+		pChannel->bReading = false;
+		pChannel->bLocked = false;
+		LWP_CondBroadcast(pChannel->pDoneCondition);
+		LWP_MutexUnlock(gCdStreamMutex);
+	}
+	return nil;
+#else
+#ifndef ONE_THREAD_PER_CHANNEL
+	while (gCdStreamThreadStatus != 2) {
+#ifndef ANDROID
+		sem_wait(gCdStreamSema);
+#elif ANDROID
+		pthread_mutex_lock(&gCdStreamSema);
+#endif
+
+		int32 channel = GetFirstInQueue(&gChannelRequestQ);
+		
+		// spurious wakeup
+		if (channel == -1)
+			continue;
+#else
+	int channel = *((int*)param);
+	while (gpReadInfo[channel].nThreadStatus != 2){
+		sem_wait(gpReadInfo[channel].pStartSemaphore);
+#endif
+
+		CdReadInfo *pChannel = &gpReadInfo[channel];
+		ASSERT( pChannel != nil );
+
+		// spurious wakeup or we sent interrupt signal for flushing
+		if(pChannel->nSectorsToRead == 0)
+			continue;
+
+		pChannel->bReading = true;
+
+		// Not standard POSIX :shrug:
+#ifdef __linux__
+#ifdef ONE_THREAD_PER_CHANNEL
+		if (gpReadInfo[channel].nThreadStatus == 0){
+			gpReadInfo[channel].nThreadStatus = 1;
+#else
+		if (gCdStreamThreadStatus == 0){
+			gCdStreamThreadStatus = 1;
+#endif
+			pid_t tid = syscall(SYS_gettid);
+			int ret = setpriority(PRIO_PROCESS, tid, getpriority(PRIO_PROCESS, getpid()) + 1);
+		}
+#endif
+		if ( pChannel->nStatus == STREAM_NONE )
+		{
+			ASSERT(pChannel->hFile >= 0);
+			ASSERT(pChannel->pBuffer != nil );
+
+			lseek(pChannel->hFile, (size_t)pChannel->nSectorOffset * (size_t)CDSTREAM_SECTOR_SIZE, SEEK_SET);
+			if (read(pChannel->hFile, pChannel->pBuffer, pChannel->nSectorsToRead * CDSTREAM_SECTOR_SIZE) == -1) {
+				// pChannel->nSectorsToRead == 0 at this point means we wanted to flush channel
+				// STREAM_WAITING is a little hack to make CStreaming not process this data
+				pChannel->nStatus = pChannel->nSectorsToRead == 0 ? STREAM_WAITING : STREAM_ERROR;
+			} else {
+				pChannel->nStatus = STREAM_NONE;
+			}
+		}
+
+#ifndef ONE_THREAD_PER_CHANNEL
+		RemoveFirstInQueue(&gChannelRequestQ);
+#endif
+
+		pChannel->nSectorsToRead = 0;
+		if ( pChannel->bLocked )
+		{
+			pChannel->bLocked = 0;
+#ifndef ANDROID
+			sem_post(pChannel->pDoneSemaphore);
+#else
+            pthread_mutex_unlock(&pChannel->pDoneSemaphore);
+#endif
+		}
+		pChannel->bReading = false;
+	}
+	char semName[20];
+#ifndef ONE_THREAD_PER_CHANNEL
+	for ( int32 i = 0; i < gNumChannels; i++ )
+	{
+#ifndef ANDROID
+		RE3_SEM_CLOSE(gpReadInfo[i].pDoneSemaphore, "/semaphore_done%d", i);
+#elif ANDROID
+		pthread_mutex_destroy(&gpReadInfo[i].pDoneSemaphore);
+#endif
+	}
+#ifndef ANDROID
+	RE3_SEM_CLOSE(gCdStreamSema, "/semaphore_cd_stream");
+#elif ANDROID
+    pthread_mutex_destroy(&gCdStreamSema);
+#endif
+	free(gChannelRequestQ.items);
+#else
+	RE3_SEM_CLOSE(gpReadInfo[channel].pStartSemaphore, "/semaphore_start%d", channel);
+
+	RE3_SEM_CLOSE(gpReadInfo[channel].pDoneSemaphore, "/semaphore_done%d", channel);
+#endif
+	if (gpReadInfo)
+		free(gpReadInfo);
+	gpReadInfo = nil;
+	pthread_exit(nil);
+#endif // NINTENDO_WII
+}
+
+bool
+CdStreamAddImage(char const *path)
+{
+	ASSERT(path != nil);
+	ASSERT(gNumImages < MAX_CDIMAGES);
+
+	gImgFiles[gNumImages] = open(path, _gdwCdStreamFlags);
+
+	// Fix case sensitivity and backslashes.
+	if (gImgFiles[gNumImages] == -1) {
+		char* real = casepath(path, false);
+		if (real)
+		{
+			gImgFiles[gNumImages] = open(real, _gdwCdStreamFlags);
+			free(real);
+		}
+	}
+
+	if ( gImgFiles[gNumImages] == -1 ) {
+		assert(false);
+		return false;
+	}
+
+	gImgNames[gNumImages] = strdup(path);
+	gImgFiles[gNumImages]++; // because -1: error 0: not used
+
+	strcpy(gCdImageNames[gNumImages], path);
+
+	gNumImages++;
+
+	return true;
+}
+
+char *
+CdStreamGetImageName(int32 cd)
+{
+	ASSERT(cd < MAX_CDIMAGES);
+	if ( gImgFiles[cd] > 0)
+		return gCdImageNames[cd];
+
+	return nil;
+}
+
+void
+CdStreamRemoveImages(void)
+{
+	for ( int32 i = 0; i < gNumChannels; i++ ) {
+#ifdef FLUSHABLE_STREAMING
+		flushStream[i] = 1;
+#endif
+		CdStreamSync(i);
+	}
+
+	for ( int32 i = 0; i < gNumImages; i++ )
+	{
+		close(gImgFiles[i] - 1);
+		free(gImgNames[i]);
+		gImgFiles[i] = 0;
+	}
+
+	gNumImages = 0;
+}
+
+int32
+CdStreamGetNumImages(void)
+{
+	return gNumImages;
+}
+#endif
+#endif
