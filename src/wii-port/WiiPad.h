@@ -1,8 +1,19 @@
 #ifndef WIIPAD_H
 #define WIIPAD_H
 
+#include <gccore.h>
+
 class CControllerState;
 class CMouseControllerState;
+
+enum WiiConnectedPad
+{
+	WII_PAD_NONE = 0,
+	WII_PAD_GAMECUBE,
+	WII_PAD_CLASSIC,          // Classic Controller and Classic Controller Pro
+	WII_PAD_WIIMOTE_NUNCHUK,
+	WII_PAD_WIIMOTE
+};
 
 // Brings up both input stacks.  Call once, before the first capture.
 //
@@ -23,16 +34,26 @@ void WiiPadInitialise(int pointerWidth, int pointerHeight);
 void WiiPadScan(void);
 
 // Merges every controller bound to this pad index into a single state, so the
-// game never has to know which one the player picked up.
+// game never has to know which one the player picked up.  A connected GameCube
+// pad on this channel takes exclusive ownership and silences Wiimote/Classic.
 void WiiPadCapture(int padID, CControllerState &state);
 
 // The Wiimote pointer, as the mouse the engine already knows how to use.  In
 // game it reports a turn rate as relative motion; in a menu it drives the
 // cursor's absolute position, which it writes straight to the frontend.
+// Ignored while a GameCube pad is active on channel 0.
 void WiiPadCaptureMouse(CMouseControllerState &state);
 
 // Drives the rumble motors from the shake the game asked for, and spends down
 // its remaining duration.  No other backend on this platform does either.
 void WiiPadUpdateRumble(void);
+
+// Which controller currently owns pad 0 (GameCube preferred).
+WiiConnectedPad WiiPadQueryPrimary(void);
+const char *WiiPadPrimaryName(WiiConnectedPad pad);
+
+// Full-screen boot splash naming the active controller.  Call after video and
+// WiiPadInitialise; holdSeconds is wall time on a ~60 Hz display.
+void WiiPadShowControllerSplash(void *xfb, GXRModeObj *rmode, int holdSeconds);
 
 #endif
