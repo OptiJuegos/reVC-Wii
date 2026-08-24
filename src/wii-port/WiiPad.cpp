@@ -351,6 +351,10 @@ captureGameCube(int channel, uint32 connectedMask, CControllerState &state,
 	setButton(state.LeftShoulder1, buttons & PAD_TRIGGER_L);
 	setButton(state.RightShoulder1, buttons & PAD_TRIGGER_R);
 	setButton(state.RightShoulder2, buttons & PAD_TRIGGER_Z);
+	// PS2 Mode 0 maps CPad::GetHorn to LeftShock (L3).  GameCube has no stick
+	// click, so L also fills that slot so taxi / Love Fist scripts can hear a
+	// horn without changing Pad.cpp.
+	setButton(state.LeftShock, buttons & PAD_TRIGGER_L);
 	setButton(state.Start, buttons & PAD_BUTTON_START);
 	setButton(state.DPadUp, buttons & PAD_BUTTON_UP);
 	setButton(state.DPadDown, buttons & PAD_BUTTON_DOWN);
@@ -401,6 +405,9 @@ captureClassic(const WPADData &data, CControllerState &state,
 	setButton(state.RightShoulder1, buttons & WPAD_CLASSIC_BUTTON_FULL_R);
 	setButton(state.LeftShoulder2, buttons & WPAD_CLASSIC_BUTTON_ZL);
 	setButton(state.RightShoulder2, buttons & WPAD_CLASSIC_BUTTON_ZR);
+	// Classic has no L3 either; ZL is the spare shoulder that mirrors the
+	// PS2 LeftShock / vehicle-horn binding used by mission scripts.
+	setButton(state.LeftShock, buttons & WPAD_CLASSIC_BUTTON_ZL);
 	setButton(state.Start, buttons & WPAD_CLASSIC_BUTTON_PLUS);
 	setButton(state.Select, buttons & WPAD_CLASSIC_BUTTON_MINUS);
 	setButton(state.DPadUp, buttons & WPAD_CLASSIC_BUTTON_UP);
@@ -455,6 +462,10 @@ captureWiimote(const WPADData &data, u32 expansion, CControllerState &state,
 	setButton(state.RightShoulder1, (buttons & WPAD_NUNCHUK_BUTTON_Z) ||
 		(nunchuk.btns_held & NUNCHUK_BUTTON_Z));
 	setButton(state.LeftShoulder1, (buttons & WPAD_NUNCHUK_BUTTON_C) ||
+		(nunchuk.btns_held & NUNCHUK_BUTTON_C));
+	// Same LeftShock fill as GameCube: C already drives LeftShoulder1 and also
+	// stands in for L3 so GetHorn works in Mode 0.
+	setButton(state.LeftShock, (buttons & WPAD_NUNCHUK_BUTTON_C) ||
 		(nunchuk.btns_held & NUNCHUK_BUTTON_C));
 
 	float x, y;
