@@ -20,5 +20,7 @@ fi
 
 ${SUDO} "${PACMAN_CMD}" -Syu --needed --noconfirm wii-dev
 ${SUDO} "${PACMAN_CMD}" -S --needed --noconfirm ppc-mpg123
+# Host-side tools used by scripts/build-wii.sh (powerpc-eabi-cmake wraps cmake)
+${SUDO} "${PACMAN_CMD}" -S --needed --noconfirm cmake make
 
 echo "Done. Run ./scripts/build-wii.sh to compile."
