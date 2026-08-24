@@ -380,3 +380,6 @@ build-wii.bat
 
 # build
 build-wii/
+# Local deploy packages (binaries + user assets)
+deploy/
+
