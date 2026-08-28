@@ -45,6 +45,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
+set "META_SRC=%REPO%\gamefiles\wii-hbc\meta.xml"
+set "META_DST=%SD_APP%\meta.xml"
+if exist "%META_SRC%" (
+    echo [copy] %META_SRC%
+    echo    -^> %META_DST%
+    copy /Y "%META_SRC%" "%META_DST%" >nul
+)
+
 echo.
 echo OK. Eject SD, open Homebrew Channel -^> GTA Vice City Wii.
 exit /b 0
