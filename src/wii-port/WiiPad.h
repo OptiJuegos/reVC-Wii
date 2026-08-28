@@ -23,9 +23,8 @@ enum WiiConnectedPad
 // pointer is measured against the centre of the screen by is wrong.
 void WiiPadInitialise(int pointerWidth, int pointerHeight);
 
-// PS2-style lock-on (GetTarget / FindWeaponLockOnTarget) is disabled while
-// CCamera::m_bUseMouse3rdPerson is true.  The Wii build inherits PC defaults,
-// so force Classic control here and after LoadSettings.
+// Force Classic / PS2 control (Zelda walk, lock-on) and Wii stick tuning after boot
+// or LoadSettings so a PC gta_vc.set cannot leave mouse mode or a huge deadzone.
 void WiiPadApplyControlDefaults(void);
 
 // Latches one sample from both stacks.  Everything below reads whatever this

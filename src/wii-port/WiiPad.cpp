@@ -601,6 +601,12 @@ WiiPadApplyControlDefaults(void)
 {
 	FrontEndMenuManager.m_ControlMethod = CONTROL_CLASSIC;
 	CCamera::m_bUseMouse3rdPerson = false;
+	// PC gta_vc.set often stores a 0.3 deadzone for XInput.  Classic Zelda walk reads
+	// stick magnitude directly; with our gate normalisation that deadzone leaves barely
+	// any deflection and movement feels like a nudge of the stick.
+	ControlsManager.m_lStickDeadzone = 0.12f;
+	ControlsManager.m_lStickSensX = 1.15f;
+	ControlsManager.m_lStickSensY = 1.15f;
 }
 
 void
