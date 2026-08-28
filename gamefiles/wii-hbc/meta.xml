@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <app version="1">
-  <name>reVC</name>
+  <name>GTA Vice City Wii</name>
   <coder>OptiJuegos / reVC contributors</coder>
-  <version>1.0</version>
-  <release_date>20250801</release_date>
-  <short_description>GTA Vice City Wii port</short_description>
-  <long_description>reVC Wii homebrew port. Place reVC.dol (do not rename) and GTA Vice City PC assets in this folder. Requires DATA/GTA_VC.DAT.</long_description>
+  <version>1.1.2</version>
+  <release_date>20260827000000</release_date>
+  <short_description>GTA Vice City on the Wii!</short_description>
+  <long_description>reVC Wii v1.1.2: modo PS2/Classic, auto-apuntado y velocidad de caminar corregida.</long_description>
+  <ahb_access/>
 </app>
