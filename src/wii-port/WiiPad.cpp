@@ -425,6 +425,8 @@ captureClassic(const WPADData &data, CControllerState &state,
 	StickAccumulator &sticks, const StickSettings &settings)
 {
 	const u32 buttons = data.btns_h;
+	const bool inCar = playerInVehicle();
+
 	setButton(state.Cross, buttons & WPAD_CLASSIC_BUTTON_B);
 	setButton(state.Circle, buttons & WPAD_CLASSIC_BUTTON_A);
 	setButton(state.Square, buttons & WPAD_CLASSIC_BUTTON_Y);
@@ -433,15 +435,26 @@ captureClassic(const WPADData &data, CControllerState &state,
 	setButton(state.RightShoulder1, buttons & WPAD_CLASSIC_BUTTON_FULL_R);
 	setButton(state.LeftShoulder2, buttons & WPAD_CLASSIC_BUTTON_ZL);
 	setButton(state.RightShoulder2, buttons & WPAD_CLASSIC_BUTTON_ZR);
-	// Classic has no L3 either; ZL is the spare shoulder that mirrors the
-	// PS2 LeftShock / vehicle-horn binding used by mission scripts.
-	setButton(state.LeftShock, buttons & WPAD_CLASSIC_BUTTON_ZL);
+	// Mode 0 GetHorn reads LeftShock (PS2 L3).  D-Pad Up is the horn; do not
+	// also write state.DPadUp or steering will fire with the horn.
+	setButton(state.LeftShock, buttons & WPAD_CLASSIC_BUTTON_UP);
 	setButton(state.Start, buttons & WPAD_CLASSIC_BUTTON_PLUS);
 	setButton(state.Select, buttons & WPAD_CLASSIC_BUTTON_MINUS);
-	setButton(state.DPadUp, buttons & WPAD_CLASSIC_BUTTON_UP);
-	setButton(state.DPadDown, buttons & WPAD_CLASSIC_BUTTON_DOWN);
-	setButton(state.DPadLeft, buttons & WPAD_CLASSIC_BUTTON_LEFT);
-	setButton(state.DPadRight, buttons & WPAD_CLASSIC_BUTTON_RIGHT);
+
+	if(inCar){
+		// In a vehicle: D-Pad L/R look (GetLookLeft/Right) without dropping ZL/ZR.
+		setButton(state.LeftShoulder2, (buttons & WPAD_CLASSIC_BUTTON_ZL) ||
+			(buttons & WPAD_CLASSIC_BUTTON_LEFT));
+		setButton(state.RightShoulder2, (buttons & WPAD_CLASSIC_BUTTON_ZR) ||
+			(buttons & WPAD_CLASSIC_BUTTON_RIGHT));
+	}else{
+		// On foot: D-Pad L/R change weapons; other D-Pad bits stay unmapped.
+		setButton(state.LeftShoulder2, (buttons & WPAD_CLASSIC_BUTTON_ZL) ||
+			(buttons & WPAD_CLASSIC_BUTTON_LEFT));
+		setButton(state.RightShoulder2, (buttons & WPAD_CLASSIC_BUTTON_ZR) ||
+			(buttons & WPAD_CLASSIC_BUTTON_RIGHT));
+		setButton(state.DPadDown, buttons & WPAD_CLASSIC_BUTTON_DOWN);
+	}
 
 	// readJoystick already normalises to -1..1 with +Y upwards, so only the sign
 	// of Y has to be turned around to match the screen.
@@ -802,7 +815,7 @@ WiiPadShowControllerSplash(void *xfb, GXRModeObj *rmode, int holdSeconds)
 		std::printf("  Aim: L    Shoot: B    Horn: Z\n");
 		std::printf("  In car -- Radio: D-Pad Up | Look: D-Pad L/R\n");
 	}else if(pad == WII_PAD_CLASSIC){
-		std::printf("  Horn: ZL\n");
+		std::printf("  Horn: D-Pad Up\n");
 	}else if(pad == WII_PAD_WIIMOTE_NUNCHUK){
 		std::printf("  Horn: Nunchuk C\n");
 	}
