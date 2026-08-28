@@ -7,6 +7,7 @@
 #include <wiiuse/wpad.h>
 
 #include "common.h"
+#include "Camera.h"
 #include "ControllerConfig.h"
 #include "Frontend.h"
 #include "Pad.h"
@@ -592,6 +593,14 @@ WiiPadInitialise(int pointerWidth, int pointerHeight)
 	// resolution is set.  Without it they stay in wiiuse's default space and
 	// every offset measured against the centre of the screen is wrong.
 	WPAD_SetVRes(WPAD_CHAN_ALL, (u32)pointerWidth, (u32)pointerHeight);
+	WiiPadApplyControlDefaults();
+}
+
+void
+WiiPadApplyControlDefaults(void)
+{
+	FrontEndMenuManager.m_ControlMethod = CONTROL_CLASSIC;
+	CCamera::m_bUseMouse3rdPerson = false;
 }
 
 void

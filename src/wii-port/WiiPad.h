@@ -23,6 +23,11 @@ enum WiiConnectedPad
 // pointer is measured against the centre of the screen by is wrong.
 void WiiPadInitialise(int pointerWidth, int pointerHeight);
 
+// PS2-style lock-on (GetTarget / FindWeaponLockOnTarget) is disabled while
+// CCamera::m_bUseMouse3rdPerson is true.  The Wii build inherits PC defaults,
+// so force Classic control here and after LoadSettings.
+void WiiPadApplyControlDefaults(void);
+
 // Latches one sample from both stacks.  Everything below reads whatever this
 // last left behind, so it has to run first and exactly once per frame.
 //
