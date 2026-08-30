@@ -26,6 +26,11 @@
 #include "SaveBuf.h"
 
 #define PAD_MOVE_TO_GAME_WORLD_MOVE 60.0f
+#ifdef NINTENDO_WII
+// Zelda walk scales stick magnitude by this divisor; slightly lower on Wii so a
+// deflected stick reaches walk/run speed with the gate-normalised axes we send.
+#define PAD_MOVE_TO_GAME_WORLD_MOVE_ZELDA 38.0f
+#endif
 
 bool CPlayerPed::bDontAllowWeaponChange;
 #ifndef MASTER
@@ -1423,7 +1428,9 @@ CPlayerPed::ProcessPlayerWeapon(CPad *padUsed)
 #ifdef FREE_CAM
 				|| (!CCamera::bFreeCam && CCamera::m_bUseMouse3rdPerson)
 #else
+#ifndef NINTENDO_WII
 				|| CCamera::m_bUseMouse3rdPerson
+#endif
 #endif		
 			) {
 				ClearWeaponTarget();
@@ -1457,7 +1464,11 @@ CPlayerPed::ProcessPlayerWeapon(CPad *padUsed)
 			TheCamera.SetNewPlayerWeaponMode(CCam::MODE_SYPHON, 0, 0);
 			TheCamera.UpdateAimingCoors(m_pPointGunAt->GetPosition());
 
-		} else if (!CCamera::m_bUseMouse3rdPerson) {
+		} else if (!CCamera::m_bUseMouse3rdPerson
+#ifdef NINTENDO_WII
+			|| padUsed->GetTarget()
+#endif
+		) {
 			if (padUsed->TargetJustDown() || TheCamera.m_bJustJumpedOutOf1stPersonBecauseOfTarget)
 				FindWeaponLockOnTarget();
 		}
@@ -1506,7 +1517,11 @@ CPlayerPed::PlayerControlZelda(CPad *padUsed)
 		padMoveInGameUnit = 0.0f;
 		smoothSprayWithoutMove = true;
 	} else {
+#ifdef NINTENDO_WII
+		padMoveInGameUnit = CVector2D(leftRight, upDown).Magnitude() / PAD_MOVE_TO_GAME_WORLD_MOVE_ZELDA;
+#else
 		padMoveInGameUnit = CVector2D(leftRight, upDown).Magnitude() / PAD_MOVE_TO_GAME_WORLD_MOVE;
+#endif
 	}
 
 #ifdef FREE_CAM
@@ -1523,6 +1538,11 @@ CPlayerPed::PlayerControlZelda(CPad *padUsed)
 			m_fRotationDest = m_fRotationCur - leftRight / 128.0f * smoothSprayRate * CTimer::GetTimeStep();
 		} else {
 			m_fRotationDest = neededTurn;
+#ifdef NINTENDO_WII
+			// Anim velocity is projected along m_fRotationCur; if the ped lags the
+			// stick heading it shuffles at a crawl even with full deflection.
+			m_fRotationCur = neededTurn;
+#endif
 		}
 
 		float maxAcc = 0.07f * CTimer::GetTimeStep();

@@ -7,6 +7,71 @@
 
 THANKS GARYODERNICHTS FOR YOUR WIIU VICE CITY PORT (every endian change from him is STOLEN in this port!!)
 
+## Building for Wii (Homebrew Channel)
+
+### Requirements
+
+- [devkitPro](https://devkitpro.org/wiki/Getting_Started) with `wii-dev` and `ppc-mpg123`
+- Git
+- A legal copy of GTA Vice City PC assets
+- [Dolphin Emulator](https://dolphin-emu.org/) (recommended — load `reVC.dol` directly)
+- Wii with Homebrew Channel (optional, for hardware testing)
+
+See [requirements.txt](requirements.txt) for the full dependency list.
+
+### Quick setup
+
+**Windows** (after installing [devkitPro](https://devkitpro.org/wiki/Getting_Started)):
+
+```bat
+scripts\setup-wii-dev-windows.bat
+```
+
+**Linux** (after installing [devkitPro](https://devkitpro.org/wiki/Getting_Started)):
+
+```bash
+chmod +x scripts/setup-wii-dev-linux.sh scripts/build-wii.sh
+./scripts/setup-wii-dev-linux.sh
+```
+
+### Clone
+
+```bash
+git clone --recursive https://github.com/OptiJuegos/reVC-Wii.git
+cd reVC-Wii
+git submodule update --init --recursive   # if you forgot --recursive
+```
+
+### Build (full game)
+
+Open **devkitPro MSYS** (Windows) or a terminal (Linux):
+
+```bash
+./scripts/build-wii.sh
+# or manually:
+mkdir -p build-wii
+powerpc-eabi-cmake -S . -B build-wii -DREVC_VENDORED_LIBRW=ON -DWII_GAME_BOOT=ON
+cmake --build build-wii -j$(nproc)
+```
+
+Output: `build-wii/src/reVC.dol` — **do not rename this file**.
+
+### Testing with Dolphin
+
+1. Place GTA VC PC assets in a folder (e.g. `apps/reVC/`) alongside `reVC.dol`
+2. In Dolphin (Wii mode): **File → Open** → select `reVC.dol`
+3. Or point Dolphin's virtual SD to the folder containing `apps/reVC/`
+
+### Install on SD/USB (Homebrew Channel)
+
+Copy to `sd:/apps/reVC/`:
+
+- `reVC.dol` from `build-wii/src/` (**keep the filename, do not rename to boot.dol**)
+- `meta.xml`, `icon.png`
+- GTA VC PC assets (must include `DATA/GTA_VC.DAT`)
+
+Supported paths: `sd:/apps/reVC`, `usb:/apps/reVC`, or the folder containing `reVC.dol`.
+
 ## Intro
 
 In this repository you'll find the fully reversed source code for GTA VC ([miami](https://github.com/mrxenginner/reVC/tree/miami/) branch).

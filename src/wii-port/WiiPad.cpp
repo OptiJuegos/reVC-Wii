@@ -1,18 +1,24 @@
 #include <cmath>
+#include <cstdio>
 
 #include <gccore.h>
+#include <ogc/consol.h>
 #include <ogc/lwp_watchdog.h>
 #include <wiiuse/wpad.h>
 
 #include "common.h"
+#include "Camera.h"
 #include "ControllerConfig.h"
 #include "Frontend.h"
 #include "Pad.h"
+#include "PlayerPed.h"
 #include "Timer.h"
 #include "WiiPad.h"
 #include "WiiTrace.h"
 #include "platform.h"
 #include "skeleton.h"
+
+CPlayerPed *FindPlayerPed(void);
 
 // Stick handling ported from the BetaPlusPlus Wii port (src/wii/wii/
 // WiiPadState.cpp in the reference tree).  The failure modes it works around
@@ -336,26 +342,52 @@ addStick(float x, float y, float deadzone, float &outX, float &outY)
 // error, so it is a real connected test.  Guessing presence from stick
 // deflection instead lets an idle pad resting a couple of counts off centre
 // claim every frame.
-void
+bool
+playerInVehicle(void)
+{
+	CPlayerPed *ped = FindPlayerPed();
+	return ped != nil && ped->bInVehicle;
+}
+
+bool
 captureGameCube(int channel, uint32 connectedMask, CControllerState &state,
 	StickAccumulator &sticks, const StickSettings &settings)
 {
 	if((connectedMask & (1 << channel)) == 0)
-		return;
+		return false;
 
 	const u16 buttons = PAD_ButtonsHeld(channel);
+	const bool inCar = playerInVehicle();
+
+	// Face buttons: A=Cross (accelerate / sprint), B=Circle (Mode 0 GetWeapon =
+	// shoot / brake).  Keep that so B is always fire on foot.
 	setButton(state.Cross, buttons & PAD_BUTTON_A);
 	setButton(state.Circle, buttons & PAD_BUTTON_B);
 	setButton(state.Square, buttons & PAD_BUTTON_X);
 	setButton(state.Triangle, buttons & PAD_BUTTON_Y);
-	setButton(state.LeftShoulder1, buttons & PAD_TRIGGER_L);
-	setButton(state.RightShoulder1, buttons & PAD_TRIGGER_R);
-	setButton(state.RightShoulder2, buttons & PAD_TRIGGER_Z);
 	setButton(state.Start, buttons & PAD_BUTTON_START);
-	setButton(state.DPadUp, buttons & PAD_BUTTON_UP);
-	setButton(state.DPadDown, buttons & PAD_BUTTON_DOWN);
-	setButton(state.DPadLeft, buttons & PAD_BUTTON_LEFT);
-	setButton(state.DPadRight, buttons & PAD_BUTTON_RIGHT);
+
+	// Mode 0 GetTarget / auto-aim reads RightShoulder1.  L owns that now; R is
+	// free of aim so it does not double up.  Horn (LeftShock) moves to Z so L
+	// is not shared with radio/aim again.
+	setButton(state.RightShoulder1, buttons & PAD_TRIGGER_L);
+	setButton(state.LeftShock, buttons & PAD_TRIGGER_Z);
+
+	if(inCar){
+		// Only in a vehicle: D-Pad is remapped away from steering.
+		// Radio = ChangeStationJustDown -> LeftShoulder1 <- D-Pad Up.
+		// Look L/R = LeftShoulder2 / RightShoulder2 <- D-Pad Left / Right.
+		setButton(state.LeftShoulder1, buttons & PAD_BUTTON_UP);
+		setButton(state.LeftShoulder2, buttons & PAD_BUTTON_LEFT);
+		setButton(state.RightShoulder2, buttons & PAD_BUTTON_RIGHT);
+	}else{
+		// On foot: leave state.DPad* unset so the pad does not walk / steer.
+		// CycleWeaponLeft/Right read L2/R2 -- bind those to D-Pad Left / Right.
+		setButton(state.LeftShoulder2, buttons & PAD_BUTTON_LEFT);
+		setButton(state.RightShoulder2, buttons & PAD_BUTTON_RIGHT);
+		// CollectPickupJustDown Mode 0 still wants LeftShoulder1; R fills it on foot.
+		setButton(state.LeftShoulder1, buttons & PAD_TRIGGER_R);
+	}
 
 	// PAD_Stick* report raw counts offset from the calibrated origin, so the gate
 	// is normalised away before anything else looks at them.  Their Y grows
@@ -370,6 +402,7 @@ captureGameCube(int channel, uint32 connectedMask, CControllerState &state,
 	y = -PAD_SubStickY(channel);
 	normalizeGameCubeStick(x, y, kGameCubeSubStickRange, kGameCubeSubStickCorner);
 	addStick(x, y, settings.rightDeadzone, sticks.rightX, sticks.rightY);
+	return true;
 }
 
 // WPAD_Probe is the supported "what is plugged into this channel" query and is
@@ -393,6 +426,8 @@ captureClassic(const WPADData &data, CControllerState &state,
 	StickAccumulator &sticks, const StickSettings &settings)
 {
 	const u32 buttons = data.btns_h;
+	const bool inCar = playerInVehicle();
+
 	setButton(state.Cross, buttons & WPAD_CLASSIC_BUTTON_B);
 	setButton(state.Circle, buttons & WPAD_CLASSIC_BUTTON_A);
 	setButton(state.Square, buttons & WPAD_CLASSIC_BUTTON_Y);
@@ -401,12 +436,26 @@ captureClassic(const WPADData &data, CControllerState &state,
 	setButton(state.RightShoulder1, buttons & WPAD_CLASSIC_BUTTON_FULL_R);
 	setButton(state.LeftShoulder2, buttons & WPAD_CLASSIC_BUTTON_ZL);
 	setButton(state.RightShoulder2, buttons & WPAD_CLASSIC_BUTTON_ZR);
+	// Mode 0 GetHorn reads LeftShock (PS2 L3).  D-Pad Up is the horn; do not
+	// also write state.DPadUp or steering will fire with the horn.
+	setButton(state.LeftShock, buttons & WPAD_CLASSIC_BUTTON_UP);
 	setButton(state.Start, buttons & WPAD_CLASSIC_BUTTON_PLUS);
 	setButton(state.Select, buttons & WPAD_CLASSIC_BUTTON_MINUS);
-	setButton(state.DPadUp, buttons & WPAD_CLASSIC_BUTTON_UP);
-	setButton(state.DPadDown, buttons & WPAD_CLASSIC_BUTTON_DOWN);
-	setButton(state.DPadLeft, buttons & WPAD_CLASSIC_BUTTON_LEFT);
-	setButton(state.DPadRight, buttons & WPAD_CLASSIC_BUTTON_RIGHT);
+
+	if(inCar){
+		// In a vehicle: D-Pad L/R look (GetLookLeft/Right) without dropping ZL/ZR.
+		setButton(state.LeftShoulder2, (buttons & WPAD_CLASSIC_BUTTON_ZL) ||
+			(buttons & WPAD_CLASSIC_BUTTON_LEFT));
+		setButton(state.RightShoulder2, (buttons & WPAD_CLASSIC_BUTTON_ZR) ||
+			(buttons & WPAD_CLASSIC_BUTTON_RIGHT));
+	}else{
+		// On foot: D-Pad L/R change weapons; other D-Pad bits stay unmapped.
+		setButton(state.LeftShoulder2, (buttons & WPAD_CLASSIC_BUTTON_ZL) ||
+			(buttons & WPAD_CLASSIC_BUTTON_LEFT));
+		setButton(state.RightShoulder2, (buttons & WPAD_CLASSIC_BUTTON_ZR) ||
+			(buttons & WPAD_CLASSIC_BUTTON_RIGHT));
+		setButton(state.DPadDown, buttons & WPAD_CLASSIC_BUTTON_DOWN);
+	}
 
 	// readJoystick already normalises to -1..1 with +Y upwards, so only the sign
 	// of Y has to be turned around to match the screen.
@@ -455,6 +504,10 @@ captureWiimote(const WPADData &data, u32 expansion, CControllerState &state,
 	setButton(state.RightShoulder1, (buttons & WPAD_NUNCHUK_BUTTON_Z) ||
 		(nunchuk.btns_held & NUNCHUK_BUTTON_Z));
 	setButton(state.LeftShoulder1, (buttons & WPAD_NUNCHUK_BUTTON_C) ||
+		(nunchuk.btns_held & NUNCHUK_BUTTON_C));
+	// Same LeftShock fill as GameCube: C already drives LeftShoulder1 and also
+	// stands in for L3 so GetHorn works in Mode 0.
+	setButton(state.LeftShock, (buttons & WPAD_NUNCHUK_BUTTON_C) ||
 		(nunchuk.btns_held & NUNCHUK_BUTTON_C));
 
 	float x, y;
@@ -540,6 +593,20 @@ WiiPadInitialise(int pointerWidth, int pointerHeight)
 	// resolution is set.  Without it they stay in wiiuse's default space and
 	// every offset measured against the centre of the screen is wrong.
 	WPAD_SetVRes(WPAD_CHAN_ALL, (u32)pointerWidth, (u32)pointerHeight);
+	WiiPadApplyControlDefaults();
+}
+
+void
+WiiPadApplyControlDefaults(void)
+{
+	FrontEndMenuManager.m_ControlMethod = CONTROL_CLASSIC;
+	CCamera::m_bUseMouse3rdPerson = false;
+	// PC gta_vc.set often stores a 0.3 deadzone for XInput.  Classic Zelda walk reads
+	// stick magnitude directly; with our gate normalisation that deadzone leaves barely
+	// any deflection and movement feels like a nudge of the stick.
+	ControlsManager.m_lStickDeadzone = 0.12f;
+	ControlsManager.m_lStickSensX = 1.15f;
+	ControlsManager.m_lStickSensY = 1.15f;
 }
 
 void
@@ -577,15 +644,18 @@ WiiPadCapture(int padID, CControllerState &state)
 	const StickSettings settings = currentStickSettings();
 
 	StickAccumulator sticks = { 0.0f, 0.0f, 0.0f, 0.0f };
-	captureGameCube(padID, s_connectedGameCubePads, state, sticks, settings);
-
-	WPADData *data = WPAD_Data(padID);
-	if(data != nullptr){
-		const u32 expansion = probeExpansion(padID, *data);
-		if(expansion == WPAD_EXP_CLASSIC)
-			captureClassic(*data, state, sticks, settings);
-		else
-			captureWiimote(*data, expansion, state, sticks, settings);
+	// A live GameCube pad owns this slot alone.  Merging Wiimote / Classic on
+	// top of it was what made IR and remote buttons steal camera and actions
+	// while a GC controller was already plugged in.
+	if(!captureGameCube(padID, s_connectedGameCubePads, state, sticks, settings)){
+		WPADData *data = WPAD_Data(padID);
+		if(data != nullptr){
+			const u32 expansion = probeExpansion(padID, *data);
+			if(expansion == WPAD_EXP_CLASSIC)
+				captureClassic(*data, state, sticks, settings);
+			else
+				captureWiimote(*data, expansion, state, sticks, settings);
+		}
 	}
 
 	state.LeftStickX = toAxis(sticks.leftX, settings.leftSensitivityX);
@@ -600,6 +670,13 @@ WiiPadCaptureMouse(CMouseControllerState &state)
 	state.Clear();
 	state.x = 0.0f;
 	state.y = 0.0f;
+
+	// Same exclusivity as WiiPadCapture: any GameCube pad silences IR so a
+	// live remote cannot steer the camera while driving with GC.
+	if(s_connectedGameCubePads != 0){
+		stopPointerHold();
+		return;
+	}
 
 	WPADData *data = WPAD_Data(WPAD_CHAN_0);
 	if(data == nullptr){
@@ -683,4 +760,88 @@ WiiPadUpdateRumble(void)
 	const int running = pad->ShakeFreq != 0 ? 1 : 0;
 	WPAD_Rumble(WPAD_CHAN_0, running);
 	PAD_ControlMotor(PAD_CHAN0, running ? PAD_MOTOR_RUMBLE : PAD_MOTOR_STOP);
+}
+
+WiiConnectedPad
+WiiPadQueryPrimary(void)
+{
+	// Prefer whatever is already plugged into a GameCube port -- that is the
+	// device that also silences Wiimote input in WiiPadCapture.
+	if(s_connectedGameCubePads != 0)
+		return WII_PAD_GAMECUBE;
+
+	for(int channel = 0; channel < WPAD_MAX_WIIMOTES; channel++){
+		WPADData *data = WPAD_Data(channel);
+		if(data == nullptr || data->err != WPAD_ERR_NONE)
+			continue;
+		const u32 expansion = probeExpansion(channel, *data);
+		if(expansion == WPAD_EXP_CLASSIC)
+			return WII_PAD_CLASSIC;
+		if(expansion == WPAD_EXP_NUNCHUK)
+			return WII_PAD_WIIMOTE_NUNCHUK;
+		return WII_PAD_WIIMOTE;
+	}
+	return WII_PAD_NONE;
+}
+
+const char *
+WiiPadPrimaryName(WiiConnectedPad pad)
+{
+	switch(pad){
+	case WII_PAD_GAMECUBE: return "GameCube Controller";
+	case WII_PAD_CLASSIC: return "Classic Controller / Classic Pro";
+	case WII_PAD_WIIMOTE_NUNCHUK: return "Wii Remote + Nunchuk";
+	case WII_PAD_WIIMOTE: return "Wii Remote";
+	default: return "No controller detected";
+	}
+}
+
+void
+WiiPadShowControllerSplash(void *xfb, GXRModeObj *rmode, int holdSeconds)
+{
+	if(xfb == nullptr || rmode == nullptr)
+		return;
+
+	// A few scans so hot-plug / wireless association has a chance to settle
+	// before we decide what to draw.
+	for(int i = 0; i < 8; i++){
+		WiiPadScan();
+		VIDEO_WaitVSync();
+	}
+
+	const WiiConnectedPad pad = WiiPadQueryPrimary();
+	const char *name = WiiPadPrimaryName(pad);
+
+	VIDEO_ClearFrameBuffer(rmode, xfb, COLOR_BLACK);
+	VIDEO_SetNextFramebuffer(xfb);
+	VIDEO_Flush();
+	VIDEO_WaitVSync();
+
+	CON_Init(xfb, 40, 40, rmode->fbWidth - 40, rmode->xfbHeight - 40,
+		rmode->fbWidth * VI_DISPLAY_PIX_SZ);
+	std::printf("\x1b[2;0H");
+	std::printf("========================================\n");
+	std::printf("  reVC Wii\n");
+	std::printf("========================================\n\n");
+	std::printf("  Active controller:\n\n");
+	std::printf("    >>>  %s  <<<\n\n", name);
+	std::printf("----------------------------------------\n");
+	if(pad == WII_PAD_GAMECUBE){
+		std::printf("  Aim: L    Shoot: B    Horn: Z\n");
+		std::printf("  In car -- Radio: D-Pad Up | Look: D-Pad L/R\n");
+	}else if(pad == WII_PAD_CLASSIC){
+		std::printf("  Horn: D-Pad Up\n");
+	}else if(pad == WII_PAD_WIIMOTE_NUNCHUK){
+		std::printf("  Horn: Nunchuk C\n");
+	}
+	std::printf("\n  GameCube pad has priority if plugged in.\n");
+	std::printf("  Starting...\n");
+
+	WiiTraceReport("WII pad: splash primary=%s\n", name);
+
+	const int frames = holdSeconds * 60;
+	for(int i = 0; i < frames; i++){
+		WiiPadScan();
+		VIDEO_WaitVSync();
+	}
 }

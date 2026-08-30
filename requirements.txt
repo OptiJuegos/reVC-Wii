@@ -1,0 +1,28 @@
+# reVC-Wii build requirements
+# Install base toolchain first: https://devkitpro.org/wiki/Getting_Started
+#
+# Then run:
+#   Windows: scripts\setup-wii-dev-windows.bat
+#   Linux:   ./scripts/setup-wii-dev-linux.sh
+#
+# Or, if you already have an official C:\devkitPro install, open MSYS2 from
+# the Start Menu and: (dkp-)pacman -S --needed wii-dev ppc-mpg123
+#
+# devkitPro pacman packages (required):
+wii-dev
+ppc-mpg123
+#
+# System tools (included in wii-dev):
+#   powerpc-eabi-gcc, powerpc-eabi-g++, powerpc-eabi-cmake
+#
+# Host tools (install with pacman if using stock MSYS2):
+#   cmake
+#   make
+#
+# Runtime (not installed via script — user must provide):
+#   - Legal copy of GTA Vice City PC assets (DATA/GTA_VC.DAT, models/, audio/, etc.)
+#   - Dolphin emulator (recommended for development/testing)
+#   - Wii with Homebrew Channel (hardware testing)
+#
+# Optional:
+#   git          # clone with submodules
