@@ -93,7 +93,9 @@ loadNativeWorldMatrix(const Matrix *world)
 	else{
 		Mtx worldMatrix;
 		makeNativeMatrix(worldMatrix, world);
-		guMtxConcat(cameraView, worldMatrix, modelView);
+		// guMtxConcat is the paired-single product on Wii, and that product
+		// does not place world meshes. The C product does.
+		c_guMtxConcat(cameraView, worldMatrix, modelView);
 	}
 
 	GX_LoadPosMtxImm(modelView, GX_PNMTX0);
